@@ -1,242 +1,215 @@
-import os 
-import shutil 
-from PIL import Image, ImageEnhance
+#!/usr/bin/env python3
+"""
+sveta_match_ps.py
+Применяет преобразование, вычисленное по паре (before, after),
+ко всем изображениям в ~/Desktop/photo -> ~/Desktop/photo_end.
+
+По умолчанию использует:
+ - before:  /mnt/data/_MG_0239.JPG
+ - after:   /mnt/data/_MG_0239_processed.JPG
+
+Чтобы использовать свои файлы, отредактируй переменные `ref_before_path` и `ref_after_path`.
+"""
+import os
 import glob
+import cv2
+import numpy as np
+from PIL import Image, ImageEnhance
+from skimage import exposure
 
-def make_dir(dir): 
-    if not os.path.exists(dir):
-        os.makedirs(dir)
+# -----------------------
+# ПУТИ (поменяй, если нужно)
+# -----------------------
+desktop = os.path.expanduser("~/Desktop")
+INPUT_DIR = os.path.join(desktop, "photo")
+OUTPUT_DIR = os.path.join(desktop, "photo_end")
+os.makedirs(INPUT_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Референс "до" и "после" — используем те, что ты прислал.
+ref_before_path = "/Users/qwertz/Desktop/_MG_0239.JPG"
+ref_after_path  = "/Users/qwertz/Desktop/фото.jpg"
+
+# Поддерживаемые форматы
+EXTS = ("*.jpg","*.jpeg","*.png","*.webp","*.tiff","*.bmp" , "*JPG", "*JPEG", "*PNG", "*WEBP", "*TIFF", "*BMP")
 
 
-def apply_sepia(img):
-    width, height = img.size
-    pixels = img.load()
-    
-    for py in range(height):
-        for px in range(width):
-            r, g, b = img.getpixel((px, py))
-            
-            tr = int(0.393 * r + 0.769 * g + 0.189 * b)
-            tg = int(0.349 * r + 0.686 * g + 0.168 * b)
-            tb = int(0.272 * r + 0.534 * g + 0.131 * b)
-            
-            pixels[px, py] = (min(255, tr), min(255, tg), min(255, tb))
-    
-    return img
+# -----------------------
+# УТИЛИТЫ
+# -----------------------
+def imread_rgb(path):
+    bgr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if bgr is None:
+        return None
+    if bgr.ndim == 2:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_GRAY2RGB)
+    else:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return rgb
 
-def process_image(input_path, output_path):
+def imwrite_rgb(path, rgb):
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(path, bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
+
+# -----------------------
+# СТРОИМ ЛУК-ТАБЛИЦУ ПО PIXEL PAIRS
+# -----------------------
+def build_channel_lut(before_rgb, after_rgb, bins=256):
     """
-    Обрабатывает изображение: применяет ЧБ фильтр, настраивает контрастность,
-    резкость и яркость
+    Строим 1D LUT для каждого канала методом усреднения
+    выходной интенсивности для каждого входного бина и интерполяцией.
     """
-    try:
-        # Открываем изображение
-        with Image.open(input_path) as img:
-            # Конвертируем в RGB если нужно (для PNG с прозрачностью)
-            if img.mode in ('RGBA', 'LA', 'P'):
-                img = img.convert('RGB')
-            
-            # Применяем черно-белый фильтр
-            img_bw = img.convert('L')
-            # Конвертируем обратно в RGB для дальнейшей обработки
-            img_processed = img_bw.convert('RGB')
-            
-            # Увеличиваем контрастность (1.5 - умеренное увеличение)
-            enhancer = ImageEnhance.Contrast(img_processed)
-            img_processed = enhancer.enhance(1.5)
-            
-            # Увеличиваем резкость (1.2 - легкое увеличение)
-            sharpness_enhancer = ImageEnhance.Sharpness(img_processed)
-            img_processed = sharpness_enhancer.enhance(1.2)
-            
-            # Настраиваем яркость (1.1 - легкое увеличение)
-            brightness_enhancer = ImageEnhance.Brightness(img_processed)
-            img_processed = brightness_enhancer.enhance(1.1)
-            
-            # Сохраняем обработанное изображение
-            img_processed.save(output_path, quality=95)
-            print(f"Обработано: {os.path.basename(input_path)}")
-            
-    except Exception as e:
-        print(f"Ошибка при обработке {input_path}: {str(e)}")
-        
-        
-def sveta_filter(input_path, output_path):
-    try:
-        with Image.open(input_path) as img:
-            # Конвертируем в RGB если нужно
-            if img.mode in ('RGBA', 'LA', 'P'):
-                img = img.convert('RGB')
-            
-            # ========== ОСНОВНЫЕ ЦВЕТОВЫЕ ХАРАКТЕРИСТИКИ ==========
-            
-            # 1. ЯРКОСТЬ (Brightness)
-            brightness_enhancer = ImageEnhance.Brightness(img)
-            img = brightness_enhancer.enhance(1.2)  # >1 - ярче, <1 - темнее
-            
-            # 2. КОНТРАСТНОСТЬ (Contrast)
-            contrast_enhancer = ImageEnhance.Contrast(img)
-            img = contrast_enhancer.enhance(1.3)  # >1 - контрастнее, <1 - мягче
-            
-            # 3. НАСЫЩЕННОСТЬ (Color)
-            color_enhancer = ImageEnhance.Color(img)
-            img = color_enhancer.enhance(0.8)  # >1 - насыщеннее, <1 - бледнее
-            
-            # 4. РЕЗКОСТЬ (Sharpness)
-            sharpness_enhancer = ImageEnhance.Sharpness(img)
-            img = sharpness_enhancer.enhance(1.5)  # >1 - резче, <1 - размытее
-            
-            # ========== СПЕЦИАЛЬНЫЕ ФИЛЬТРЫ ==========
-            
-            # 5. ЧЕРНО-БЕЛЫЙ (Grayscale)
-            # img = img.convert('L').convert('RGB')  # раскомментировать для ЧБ
-            
-            # 6. СЕПИЯ (Sepia tone)
-            # img = apply_sepia(img)  # см. функцию ниже
-            
-            # 7. ИНВЕРСИЯ ЦВЕТОВ (Negative)
-            # img = ImageOps.invert(img)
-            
-            # 8. ПОСТЕРИЗАЦИЯ (уменьшение цветов)
-            # img = ImageOps.posterize(img, bits=4)  # 4 бита = 16 цветов
-            
-            # 9. СОЛНЕЧНЫЙ СВЕТ (Solarize) - инвертирует светлые тона
-            # img = ImageOps.solarize(img, threshold=128)
-            
-            # 10. АВТОКОНТРАСТ
-            # img = ImageOps.autocontrast(img, cutoff=2)
-            
-            # 11. ВЫРАВНИВАНИЕ ЦВЕТОВ (Equalize)
-            # img = ImageOps.equalize(img)
-            
-            # ========== ЦВЕТОВЫЕ КОРРЕКЦИИ ==========
-            
-            # 12. ТЕПЛЫЕ/ХОЛОДНЫЕ ТОНА
-            # img = apply_color_balance(img, temperature=0.1)  # >0 - теплее, <0 - холоднее
-            
-            # 13. ВИНТАЖНЫЙ ЭФФЕКТ
-            # img = apply_vintage_effect(img)
-            
-            # 14. ПОВЫШЕНИЕ ЧЕТКОСТИ
-            # img = img.filter(ImageFilter.DETAIL)
-            
-            # 15. ЛЕГКОЕ РАЗМЫТИЕ
-            # img = img.filter(ImageFilter.SMOOTH)
-            
-            # 16. УСИЛЕНИЕ КРАСНЫХ ТОНОВ
-            # img = enhance_reds(img, factor=1.2)
-            
-            # ========== ДОПОЛНИТЕЛЬНЫЕ ЭФФЕКТЫ ==========
-            
-            # 17. ВИНЬЕТКА (затемнение краев)
-            # img = apply_vignette(img, strength=0.8)
-            
-            # 18. ШУМ (Grain)
-            # img = add_film_grain(img, intensity=0.1)
-            
-            # Сохраняем результат
-            img.save(output_path, quality=95, optimize=True)
-            print(f"✅ Обработано: {os.path.basename(input_path)}")
-            
-    except Exception as e:
-        print(f"❌ Ошибка при обработке {input_path}: {str(e)}")
+    # ожидаем одинаковый размер; если нет — ресайзим референс "after" под "before"
+    if before_rgb.shape != after_rgb.shape:
+        after_rgb = cv2.resize(after_rgb, (before_rgb.shape[1], before_rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ФИЛЬТРОВ ==========
+    luts = []
+    for ch in range(3):
+        src = before_rgb[..., ch].ravel().astype(np.int32)
+        dst = after_rgb[..., ch].ravel().astype(np.int32)
+        # для устойчивости возьмём случайную выборку (если картинка большая)
+        if src.size > 500000:
+            idx = np.random.choice(src.size, size=500000, replace=False)
+            src_s = src[idx]
+            dst_s = dst[idx]
+        else:
+            src_s = src; dst_s = dst
+        # средний dst по src-бинам
+        bins_edges = np.arange(257)  # 0..256
+        sums = np.zeros(256, dtype=np.float64)
+        counts = np.zeros(256, dtype=np.int64)
+        inds = src_s  # 0..255
+        for i in range(src_s.size):
+            v = inds[i]
+            sums[v] += dst_s[i]
+            counts[v] += 1
+        # избегаем деления на 0
+        avg = np.zeros(256, dtype=np.float64)
+        has = counts > 0
+        avg[has] = sums[has] / counts[has]
+        # заполнение пустых значений интерполяцией
+        x = np.where(has)[0]
+        if x.size == 0:
+            # fallback identity
+            lut = np.arange(256)
+        else:
+            y = avg[has]
+            interp = np.interp(np.arange(256), x, y)
+            lut = np.clip(interp, 0, 255).astype(np.uint8)
+        luts.append(lut)
+    return luts  # list of three arrays length 256
 
-def apply_sepia(img):
-    """Применяет сепию эффект"""
-    width, height = img.size
-    pixels = img.load()
-    
-    for py in range(height):
-        for px in range(width):
-            r, g, b = img.getpixel((px, py))
-            
-            # Формула для сепии
-            tr = int(0.393 * r + 0.769 * g + 0.189 * b)
-            tg = int(0.349 * r + 0.686 * g + 0.168 * b)
-            tb = int(0.272 * r + 0.534 * g + 0.131 * b)
-            
-            pixels[px, py] = (min(255, tr), min(255, tg), min(255, tb))
-    
-    return img
 
-def apply_color_balance(img, temperature=0.0):
-    """Корректирует цветовую температуру"""
-    # temperature > 0 - теплее (желтее)
-    # temperature < 0 - холоднее (синее)
-    r_enhancer = ImageEnhance.Color(img)
-    g_enhancer = ImageEnhance.Color(img)
-    b_enhancer = ImageEnhance.Color(img)
-    
-    # Разделяем каналы
-    r, g, b = img.split()
-    
-    # Усиливаем/ослабляем каналы в зависимости от температуры
-    r = r_enhancer.enhance(1.0 + temperature)
-    g = g_enhancer.enhance(1.0 + temperature * 0.5)
-    b = b_enhancer.enhance(1.0 - temperature)
-    
-    # Объединяем обратно
-    return Image.merge('RGB', (r, g, b))
+def apply_lut_to_img(img_rgb, luts):
+    out = img_rgb.copy()
+    for ch in range(3):
+        out[..., ch] = luts[ch][out[..., ch]]
+    return out
 
-def enhance_reds(img, factor=1.2):
-    """Усиливает красные тона"""
-    # Разделяем каналы
-    r, g, b = img.split()
-    
-    # Усиливаем красный канал
-    r_enhancer = ImageEnhance.Brightness(r)
-    r = r_enhancer.enhance(factor)
-    
-    # Объединяем обратно
-    return Image.merge('RGB', (r, g, b))
 
-def apply_vintage_effect(img):
-    """Винтажный эффект с теплыми тонами и легкой сепией"""
-    # Сначала теплые тона
-    img = apply_color_balance(img, temperature=0.15)
-    
-    # Затем сепия
-    img = apply_sepia(img)
-    
-    # Немного уменьшаем насыщенность
-    color_enhancer = ImageEnhance.Color(img)
-    img = color_enhancer.enhance(0.7)
-    
-    # Добавляем контраст
-    contrast_enhancer = ImageEnhance.Contrast(img)
-    return contrast_enhancer.enhance(1.2)
-# Основной код
-desktop_path = os.path.expanduser("~/Desktop")
-photo_dir_begin = os.path.join(desktop_path, "photo")
-photo_dir_end = os.path.join(desktop_path, "photo_end")
+# -----------------------
+# ДОПОЛНИТЕЛЬНЫЕ ЛОКАЛЬНЫЕ ПОДТЯГИВАНИЯ
+# -----------------------
+def local_adjustments(img_rgb):
+    """
+    - конвертируем в Lab, применим CLAHE к L-каналу (деликатно),
+    - вернём, немного усилим vibrance, saturation и легкую резкость с маской краёв.
+    """
+    # CLAHE на L
+    lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    L, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    L2 = clahe.apply(L.astype(np.uint8)).astype(np.float32)
+    lab2 = cv2.merge((L2, a, b))
+    rgb2 = cv2.cvtColor(lab2.astype(np.uint8), cv2.COLOR_LAB2RGB)
 
-# Создаем папки если их нет
-make_dir(photo_dir_begin)
-make_dir(photo_dir_end)
+    # Vibrance: усиление насыщенности, но меньше для уже насыщенных пикселей
+    hsv = cv2.cvtColor(rgb2, cv2.COLOR_RGB2HSV).astype(np.float32)
+    h,s,v = cv2.split(hsv)
+    # усиливаем s в тех местах, где s < 150
+    mask_low = (s < 150).astype(np.float32)
+    s = np.clip(s + mask_low * 15.0, 0, 255)
+    hsv2 = cv2.merge((h,s,v)).astype(np.uint8)
+    rgb3 = cv2.cvtColor(hsv2, cv2.COLOR_HSV2RGB)
 
-# Поддерживаемые форматы изображений
-supported_formats = ('*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.webp')
+    # Лёгкая резкость на краях, без затрагивания гладких областей:
+    gray = cv2.cvtColor(rgb3, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    edges = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=1)
+    edges = cv2.GaussianBlur(edges.astype(np.float32), (0,0), sigmaX=2)/255.0
+    edges = edges[..., None]
 
-# Получаем список всех изображений
-file_list = []
-for format in supported_formats:
-    file_list.extend(glob.glob(os.path.join(photo_dir_begin, format)))
+    # unsharp mask
+    blur = cv2.GaussianBlur(rgb3, (0,0), sigmaX=1.2)
+    sharp = np.clip(rgb3.astype(np.float32)*(1.15) - blur.astype(np.float32)*0.15, 0, 255).astype(np.uint8)
 
-print(f"Найдено {len(file_list)} изображений для обработки")
+    # смешивание sharp только на границах
+    out = (rgb3.astype(np.float32)*(1-edges) + sharp.astype(np.float32)*edges).astype(np.uint8)
+    return out
 
-# Обрабатываем каждое изображение
-for file_path in file_list:
-    if os.path.isfile(file_path):
-        # Создаем имя для выходного файла
-        filename = os.path.basename(file_path)
-        name, ext = os.path.splitext(filename)
-        output_filename = f"{name}_processed{ext}"
-        output_path = os.path.join(photo_dir_end, output_filename)
-        
-        # Обрабатываем изображение
-        # process_image(file_path, output_path)
-        sveta_filter(file_path, output_path)
 
-print("Обработка завершена!")
+# -----------------------
+# ОСНОВНОЙ ПАЙПЛАЙН
+# -----------------------
+def compute_and_apply(ref_before, ref_after, image_paths):
+    print("Чтение референса...")
+    before = imread_rgb(ref_before)
+    after  = imread_rgb(ref_after)
+    if before is None or after is None:
+        raise RuntimeError("Не удалось загрузить референсы. Проверьте пути.")
+
+    print("Построение LUT по референсам (это займёт ~10-30с)...")
+    luts = build_channel_lut(before, after)
+
+    print("Обработка файлов...")
+    for p in image_paths:
+        print("->", os.path.basename(p))
+        img = imread_rgb(p)
+        if img is None:
+            print("   ! не удалось прочитать, пропускаю")
+            continue
+
+        # 1) применим LUT
+        out = apply_lut_to_img(img, luts)
+
+        # 2) локальная доработка (CLAHE, vibrance, мягкая резкость)
+        out = local_adjustments(out)
+
+        # 3) УБРАНА ЗАЩИТА ЛИЦ - теперь все изображение обрабатывается одинаково
+
+        # 4) финальная легкая тональная корректировка - match_histogram немного по каналам
+        # используем skimage exposure.match_histograms для финального приближения к референсу
+        try:
+            out = exposure.match_histograms(out, after, multichannel=True)
+            out = np.clip(out, 0, 255).astype(np.uint8)
+        except Exception:
+            # если match_histograms не работает (очень большие размеры) — пропускаем
+            pass
+
+        # 5) сохранить (с суффиксом)
+        name = os.path.splitext(os.path.basename(p))[0]
+        ext  = os.path.splitext(p)[1]
+        out_path = os.path.join(OUTPUT_DIR, f"{name}_psmatch{ext}")
+        imwrite_rgb(out_path, out)
+        print("   сохранено:", out_path)
+
+    print("Готово.")
+
+
+# -----------------------
+# Запуск
+# -----------------------
+if __name__ == "__main__":
+    # список файлов в папке INPUT_DIR
+    files = []
+    for ex in EXTS:
+        files.extend(glob.glob(os.path.join(INPUT_DIR, ex)))
+    files = sorted(files)
+    print("Найдено:", len(files), "файлов для обработки в", INPUT_DIR)
+    if len(files) == 0:
+        print("Положи, пожалуйста, исходники в", INPUT_DIR, "и запусти снова.")
+    else:
+        compute_and_apply(ref_before_path, ref_after_path, files)
+
+    print("Готово.")
